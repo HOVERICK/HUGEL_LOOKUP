@@ -56,7 +56,7 @@ tr:hover td { background:#fcfcff; }
 
   <div class="footer">© <span id="today"></span> Yamoiza · GitHub Pages</div>
 
-  <!-- SheetJS (엑셀 파서) -->
+  <!-- SheetJS -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 document.getElementById('today').textContent = new Date().toISOString().slice(0,10);
@@ -75,8 +75,9 @@ function norm(s){ return (s||"").toString().trim().replace(/\s+/g,"").toLowerCas
 function isDigits(s){ return /^[0-9]+$/.test(s); }
 function cleanToken(s){ return String(s||"").replace(/\s+/g,"").trim(); }
 
-// ===== 버스 시트 파싱 =====
-// 시트명 → 승하차지 매핑
+/* =========================
+   버스 엑셀 파서
+   ========================= */
 function mapFromBusSheet(sheetName){
   const n = String(sheetName).replace(/\s+/g,"");
   if(n.includes("사당")) return "사당역";
@@ -85,7 +86,6 @@ function mapFromBusSheet(sheetName){
   if(n.includes("종운")) return "종합운동장역";
   return "";
 }
-// 헤더 추정(상단 50행)
 function headerRowIndex(rows){
   const re = /(예약자명|이름|성함)/;
   for(let i=0;i<Math.min(rows.length,50);i++){
@@ -122,7 +122,9 @@ function parseBusWorkbook(wb){
   return out;
 }
 
-// ===== 조(그룹) 파싱 =====
+/* =========================
+   조(그룹) 엑셀 파서 — 부서 인식 강화
+   ========================= */
 function isMarkerToken(tok){ return /^[A-Za-z가-힣]+[0-9]+$/.test(cleanToken(tok)); }
 function getMarkerFromRow(cells){
   const trimmed = (cells||[]).map(x => cleanToken(x));
@@ -132,39 +134,65 @@ function getMarkerFromRow(cells){
   return "";
 }
 function looksLikeMemberRow(cells){
-  const trimmed = (cells||[]).map(x => String(x).trim());
-  const filled = trimmed.filter(v => v!=="").length;
-  const firstIsNum = isDigits(trimmed[0]);
+  const t = (cells||[]).map(x => String(x).trim());
+  const filled = t.filter(v => v!=="").length;
+  const firstIsNum = isDigits(t[0]);
   return (filled >= 3) || (firstIsNum && filled >= 2);
 }
-function pickName(cells){
-  for (const idx of [2,1,3,0,4]){
+
+// 이름 위치까지 같이 찾음
+function pickNameWithIndex(cells){
+  const pref = [2,1,3,0,4];
+  for(const idx of pref){
     const v = String(cells[idx] ?? "").trim();
-    if(/[가-힣]{2,4}/.test(v) && !/팀|본부|센터|\)/.test(v)) return v;
+    if(/[가-힣]{2,4}/.test(v) && !/팀|본부|센터|\)/.test(v)) return {name:v, idx};
   }
-  for (let i=0;i<cells.length;i++){
+  for(let i=0;i<cells.length;i++){
     const v = String(cells[i] ?? "").trim();
-    if(/[가-힣]{2,4}/.test(v)) return v;
+    if(/[가-힣]{2,4}/.test(v)) return {name:v, idx:i};
   }
-  return "";
+  return {name:"", idx:-1};
 }
-function pickDept(cells){
-  for (const idx of [3,2,4,1,0]){
-    const v = String(cells[idx] ?? "").trim();
-    if(/팀|본부|센터|\)/.test(v)) return v;
+
+// '부서'를 이름 오른쪽에서 우선 추출 → 실패 시 키워드 매칭
+const DEPT_HINT = /(팀|본부|센터|지점|지사|실|파트|그룹|사업부|지원실|영업|생산|공정|공장|개발|전략|재무|회계|법무|인사|총무|마케팅|연구|품질|QA|QC|Lab|랩|Unit|유닛|Cell|셀)/i;
+function pickDeptSmart(cells, nameIdx){
+  // 1) 이름 오른쪽에서 첫 비어있지 않은 텍스트
+  if(nameIdx >= 0){
+    for(let i=nameIdx+1;i<cells.length;i++){
+      const v = String(cells[i] ?? "").trim();
+      if(v && !isDigits(v)) return v;
+    }
   }
-  return "";
-}
-function pickOrg(cells){
-  for (const idx of [1,2,3,0,4]){
-    const v = String(cells[idx] ?? "").trim();
-    if(v) return v;
+  // 2) 키워드 매칭 기반(팀/본부/지점/실/…)
+  for(let i=0;i<cells.length;i++){
+    const v = String(cells[i] ?? "").trim();
+    if(v && DEPT_HINT.test(v)) return v;
   }
-  return "";
+  // 3) 마지막 보루: 이름이 아닌 다른 가장 '긴' 텍스트
+  let best = "";
+  for(const v0 of cells){
+    const v = String(v0 ?? "").trim();
+    if(v && v.length > best.length) best = v;
+  }
+  return best || "";
 }
-function afternoonFromMarker(marker){
-  return cleanToken(marker).replace(/[0-9]/g,""); // 'M2' -> 'M'
+
+// '소속'은 일반적으로 이름 왼쪽(회사명 등). 없으면 다른 셀 중 짧고 깔끔한 단어를 선택
+function pickOrgSmart(cells, nameIdx){
+  if(nameIdx > 0){
+    for(let i=nameIdx-1;i>=0;i--){
+      const v = String(cells[i] ?? "").trim();
+      if(v && !isDigits(v)) return v; // 예: 휴젤, 아크로스
+    }
+  }
+  // 짧고 단정한 텍스트 우선(회사명 등)
+  const candidates = cells
+    .map(x=>String(x||"").trim())
+    .filter(v=>v && v.length<=6 && !/\s/.test(v));
+  return candidates[0] || "";
 }
+
 function parseGroupWorkbook(wb){
   const out = [];
   for(const sheetName of wb.SheetNames){
@@ -181,57 +209,52 @@ function parseGroupWorkbook(wb){
       if(!marker) continue;
       if(!looksLikeMemberRow(row)) continue;
 
-      const name = pickName(row);
+      const {name, idx:nameIdx} = pickNameWithIndex(row);
       if(!name) continue;
-      const dept = pickDept(row);
-      const org  = pickOrg(row);
+
+      const dept = pickDeptSmart(row, nameIdx);
+      const org  = pickOrgSmart(row, nameIdx);
 
       out.push({
         "이름": name,
         "부서": dept,
         "소속": org,
         "오전조": marker,
-        "오후조": afternoonFromMarker(marker)
+        "오후조": cleanToken(marker).replace(/[0-9]/g,"")
       });
     }
   }
   return out;
 }
 
-// ===== 통합(버스+조) =====
+/* =========================
+   통합(버스+조)
+   ========================= */
 function combine(busArr, groupArr){
-  // 이름 기준 매핑(동명이인 대비: 그룹의 부서/소속과 버스쪽이 여러개면 최대한 매칭)
-  const busMap = new Map(); // name -> array of bus entries
+  const busMap = new Map(); // name -> array
   for(const b of busArr){
     const key = b["이름"];
     if(!busMap.has(key)) busMap.set(key, []);
     busMap.get(key).push(b);
   }
-
   const results = [];
-  const usedBusIdx = new Map(); // name -> set of used indices
+  const usedBusIdx = new Map();
 
   function pickBusForGroup(name, dept, org){
     const list = busMap.get(name) || [];
     if(!list.length) return null;
-    // 부서/소속 우선 매칭
-    let idx = list.findIndex(x => (org && x["소속"] && x["소속"]===org));
-    if(idx<0) idx = list.findIndex(x => (dept && x["부서"] && x["부서"]===dept));
+    let idx = list.findIndex(x => org && x["소속"] && x["소속"]===org);
+    if(idx<0) idx = list.findIndex(x => dept && x["부서"] && x["부서"]===dept);
     if(idx<0) idx = 0;
-    // 사용 마킹
     const used = usedBusIdx.get(name) || new Set();
-    // 같은 인덱스가 이미 쓰였으면 다음 후보
     if(used.has(idx)){
-      for(let i=0;i<list.length;i++){
-        if(!used.has(i)){ idx = i; break; }
-      }
+      for(let i=0;i<list.length;i++){ if(!used.has(i)){ idx=i; break; } }
     }
-    used.add(idx);
-    usedBusIdx.set(name, used);
+    used.add(idx); usedBusIdx.set(name, used);
     return list[idx];
   }
 
-  // 1) 그룹 기준으로 생성(조가 있는 사람들)
+  // 조가 있는 사람
   for(const g of groupArr){
     const b = pickBusForGroup(g["이름"], g["부서"], g["소속"]);
     results.push({
@@ -243,12 +266,10 @@ function combine(busArr, groupArr){
       "오후조": g["오후조"]
     });
   }
-
-  // 2) 버스만 있는 사람들(조 정보가 없는 경우)
+  // 버스만 있는 사람
   const namesInGroup = new Set(groupArr.map(g=>g["이름"]));
   for(const [name, list] of busMap){
     if(namesInGroup.has(name)) continue;
-    // 버스에 중복이 있어도 한 줄만 대표로
     const b = list[0];
     results.push({
       "이름": name,
@@ -259,11 +280,12 @@ function combine(busArr, groupArr){
       "오후조": ""
     });
   }
-
   return results;
 }
 
-// ===== UI =====
+/* =========================
+   UI
+   ========================= */
 function render(list){
   rowsEl.innerHTML = "";
   for(const r of list){
@@ -286,7 +308,6 @@ function run(){
 }
 qEl.addEventListener("keydown", e => { if(e.key==="Enter") run(); });
 
-// ===== 로드 순서: 버스 → 그룹 → 통합 =====
 Promise.all([
   fetch(BUS_XLSX_URL,   {cache:"no-store"}).then(r=>{ if(!r.ok) throw new Error("버스 엑셀 로드 실패"); return r.arrayBuffer(); }).then(buf=>XLSX.read(buf,{type:'array'})).then(parseBusWorkbook),
   fetch(GROUP_XLSX_URL, {cache:"no-store"}).then(r=>{ if(!r.ok) throw new Error("조 엑셀 로드 실패");   return r.arrayBuffer(); }).then(buf=>XLSX.read(buf,{type:'array'})).then(parseGroupWorkbook)
