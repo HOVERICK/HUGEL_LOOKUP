@@ -4,6 +4,8 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>휴젤 버스 승하차 및 조 검색</title>
+<meta property="og:title" content="휴젤 버스 승하차 및 조 검색">
+<meta name="description" content="휴젤 행사 참가자 버스 승하차 및 조 편성 검색 페이지">
 <style>
 :root { --maxw: 900px; }
 * { box-sizing: border-box; }
@@ -123,11 +125,19 @@ function parseBusWorkbook(wb){
 }
 
 /* =========================
-   조(그룹) 엑셀 파서 — 부서 인식 강화
+   조(그룹) 엑셀 파서 — 부서 인식 강화 + 특수구간 제외
    ========================= */
 function isMarkerToken(tok){ return /^[A-Za-z가-힣]+[0-9]+$/.test(cleanToken(tok)); }
 function getMarkerFromRow(cells){
   const trimmed = (cells||[]).map(x => cleanToken(x));
+  // 특수 구간: "임원진 및 운영" → 마커 아님
+  const joined = trimmed.join("");
+  if (joined.includes("임원진및운영") || joined.includes("임원진및운영(임원진및운영)") || joined.includes("임원진및운영임원진및운영") || joined.includes("임원진및운영본부") || joined.includes("임원진및운영실") || joined.includes("임원진및운영팀") || joined.includes("임원진및운영")) {
+    return "__SKIP__";
+  }
+  if (joined.includes("임원진및운영") || joined.includes("임원진및운영")) return "__SKIP__";
+  if (trimmed.join(" ").includes("임원진 및 운영")) return "__SKIP__";
+
   const candidates = trimmed.filter(x => x && isMarkerToken(x));
   const nonEmpty = trimmed.filter(x => x).length;
   if (candidates.length === 1 && nonEmpty <= 2) return candidates[0];
@@ -139,8 +149,6 @@ function looksLikeMemberRow(cells){
   const firstIsNum = isDigits(t[0]);
   return (filled >= 3) || (firstIsNum && filled >= 2);
 }
-
-// 이름 위치까지 같이 찾음
 function pickNameWithIndex(cells){
   const pref = [2,1,3,0,4];
   for(const idx of pref){
@@ -153,23 +161,18 @@ function pickNameWithIndex(cells){
   }
   return {name:"", idx:-1};
 }
-
-// '부서'를 이름 오른쪽에서 우선 추출 → 실패 시 키워드 매칭
-const DEPT_HINT = /(팀|본부|센터|지점|지사|실|파트|그룹|사업부|지원실|영업|생산|공정|공장|개발|전략|재무|회계|법무|인사|총무|마케팅|연구|품질|QA|QC|Lab|랩|Unit|유닛|Cell|셀)/i;
+const DEPT_HINT = /(팀|본부|센터|지점|지사|실|파트|그룹|사업부|지원실|영업|생산|공정|공장|개발|전략|재무|회계|법무|인사|총무|마케팅|연구|품질|QA|QC|Lab|랩|Unit|유닛|Cell|셀|총괄|총무|대표)/i;
 function pickDeptSmart(cells, nameIdx){
-  // 1) 이름 오른쪽에서 첫 비어있지 않은 텍스트
   if(nameIdx >= 0){
     for(let i=nameIdx+1;i<cells.length;i++){
       const v = String(cells[i] ?? "").trim();
       if(v && !isDigits(v)) return v;
     }
   }
-  // 2) 키워드 매칭 기반(팀/본부/지점/실/…)
   for(let i=0;i<cells.length;i++){
     const v = String(cells[i] ?? "").trim();
     if(v && DEPT_HINT.test(v)) return v;
   }
-  // 3) 마지막 보루: 이름이 아닌 다른 가장 '긴' 텍스트
   let best = "";
   for(const v0 of cells){
     const v = String(v0 ?? "").trim();
@@ -177,22 +180,18 @@ function pickDeptSmart(cells, nameIdx){
   }
   return best || "";
 }
-
-// '소속'은 일반적으로 이름 왼쪽(회사명 등). 없으면 다른 셀 중 짧고 깔끔한 단어를 선택
 function pickOrgSmart(cells, nameIdx){
   if(nameIdx > 0){
     for(let i=nameIdx-1;i>=0;i--){
       const v = String(cells[i] ?? "").trim();
-      if(v && !isDigits(v)) return v; // 예: 휴젤, 아크로스
+      if(v && !isDigits(v)) return v;
     }
   }
-  // 짧고 단정한 텍스트 우선(회사명 등)
   const candidates = cells
     .map(x=>String(x||"").trim())
     .filter(v=>v && v.length<=6 && !/\s/.test(v));
   return candidates[0] || "";
 }
-
 function parseGroupWorkbook(wb){
   const out = [];
   for(const sheetName of wb.SheetNames){
@@ -204,8 +203,16 @@ function parseGroupWorkbook(wb){
     for(let r=0; r<rows.length; r++){
       const row = rows[r] || [];
       const found = getMarkerFromRow(row);
-      if(found){ marker = found; continue; }
+      if(found){
+        if(found === "__SKIP__"){
+          marker = "__NONE__"; // 특수 구간: 조 표시 없음
+        }else{
+          marker = found;      // 일반 마커(M2/M3…)
+        }
+        continue;
+      }
 
+      // 구성원
       if(!marker) continue;
       if(!looksLikeMemberRow(row)) continue;
 
@@ -219,8 +226,9 @@ function parseGroupWorkbook(wb){
         "이름": name,
         "부서": dept,
         "소속": org,
-        "오전조": marker,
-        "오후조": cleanToken(marker).replace(/[0-9]/g,"")
+        "버스 승하차지": "", // 그룹 엑셀에는 없음
+        "오전조": (marker !== "__NONE__") ? marker : "",
+        "오후조": (marker !== "__NONE__") ? cleanToken(marker).replace(/[0-9]/g,"") : ""
       });
     }
   }
@@ -254,7 +262,7 @@ function combine(busArr, groupArr){
     return list[idx];
   }
 
-  // 조가 있는 사람
+  // 조가 있는(또는 특수구간 공란 포함) 사람들 우선
   for(const g of groupArr){
     const b = pickBusForGroup(g["이름"], g["부서"], g["소속"]);
     results.push({
@@ -266,7 +274,8 @@ function combine(busArr, groupArr){
       "오후조": g["오후조"]
     });
   }
-  // 버스만 있는 사람
+
+  // 버스만 있는 사람(그룹에 없는 이름)
   const namesInGroup = new Set(groupArr.map(g=>g["이름"]));
   for(const [name, list] of busMap){
     if(namesInGroup.has(name)) continue;
@@ -280,6 +289,7 @@ function combine(busArr, groupArr){
       "오후조": ""
     });
   }
+
   return results;
 }
 
@@ -321,5 +331,3 @@ Promise.all([
 </script>
 </body>
 </html>
-
-
