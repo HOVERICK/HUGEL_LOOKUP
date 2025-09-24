@@ -36,7 +36,7 @@ tr:hover td { background:#fcfcff; }
 
   <div class="card">
     <div class="row">
-      <input id="q" type="text" placeholder="이름 입력 (예: 홍길동 / Sally Wu)" />
+      <input id="q" type="text" placeholder="이름 입력 (예: 홍길동 / 노정실 / 김민석B / Sally Wu)" />
       <button id="btn" onclick="run()">검색</button>
     </div>
     <div id="err" class="err"></div>
@@ -58,10 +58,12 @@ tr:hover td { background:#fcfcff; }
 
   <div class="footer">© <span id="today"></span> Yamoiza · GitHub Pages</div>
 
+  <!-- SheetJS -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 document.getElementById('today').textContent = new Date().toISOString().slice(0,10);
 
+// 엑셀 경로(레포 내)
 const BUS_XLSX_URL   = "./data/bus_records.xlsx?v="   + Date.now();
 const GROUP_XLSX_URL = "./data/group_records.xlsx?v=" + Date.now();
 
@@ -75,7 +77,9 @@ function norm(s){ return (s||"").toString().trim().replace(/\s+/g,"").toLowerCas
 function isDigits(s){ return /^[0-9]+$/.test(s); }
 function cleanToken(s){ return String(s||"").replace(/\s+/g,"").trim(); }
 
-/* ===== 버스 파서 ===== */
+/* =========================
+   버스 엑셀 파서
+   ========================= */
 function mapFromBusSheet(sheetName){
   const n = String(sheetName).replace(/\s+/g,"");
   if(n.includes("사당")) return "사당역";
@@ -120,14 +124,16 @@ function parseBusWorkbook(wb){
   return out;
 }
 
-/* ===== 조(그룹) 파서 (영문/한글 이름, 특수구간 제외) ===== */
+/* =========================
+   조(그룹) 엑셀 파서 — 이름(한글/영문/이니셜) & 부서 인식 강화 + 특수구간 제외
+   ========================= */
 function isMarkerToken(tok){ return /^[A-Za-z가-힣]+[0-9]+$/.test(cleanToken(tok)); }
 function getMarkerFromRow(cells){
   const trimmed = (cells||[]).map(x => cleanToken(x));
   const joined = trimmed.join(" ");
-  if (joined.includes("임원진 및 운영") || joined.replace(/\s+/g,"").includes("임원진및운영")) {
-    return "__SKIP__";
-  }
+  // 특수 구간: "임원진 및 운영" → 마커 아님 (해당 섹션 구성원은 조 공란)
+  if (joined.includes("임원진 및 운영") || joined.replace(/\s+/g,"").includes("임원진및운영")) return "__SKIP__";
+
   const candidates = trimmed.filter(x => x && isMarkerToken(x));
   const nonEmpty = trimmed.filter(x => x).length;
   if (candidates.length === 1 && nonEmpty <= 2) return candidates[0];
@@ -140,10 +146,17 @@ function looksLikeMemberRow(cells){
   return (filled >= 3) || (firstIsNum && filled >= 2);
 }
 
-// ✅ 이름 판정 (여기 고친 부분)
-const NAME_KO_STRICT  = /^[가-힣]{2,4}$/;          // 2~4자 한글 → 무조건 이름
-const NAME_KO_RELAXED = /^[가-힣]{5,6}$/;          // 5~6자 한글 → 키워드 없으면 이름
-const NAME_EN         = /^[A-Za-z][A-Za-z .'\-]{1,29}$/; // 영문 이름 허용
+// ✅ 이름 판정(누락 방지 강화)
+// - 순한글 2~6자 → 무조건 이름 (예: 노정실)
+// - 한글+영문 이니셜(붙임/괄호/공백) 지원 (예: 김민석B, 김주희(B), 김민석 B)
+// - 영문 이름도 지원 (예: Sally Wu)
+const NAME_KO_CORE           = /^[가-힣]{2,6}$/;
+const NAME_KO_WITH_SUFFIX    = /^[가-힣]{2,6}[A-Za-z]$/;
+const NAME_KO_WITH_PAREN_SFX = /^[가-힣]{2,6}\([A-Za-z]{1,2}\)$/;
+const NAME_KO_WITH_SPACE_SFX = /^[가-힣]{2,6}\s+[A-Za-z]{1,2}$/;
+const NAME_EN                = /^[A-Za-z][A-Za-z .'\-]{1,29}$/;
+
+// 부서 키워드
 const DEPT_WORD = /(팀|본부|센터|지점|지사|실|파트|그룹|사업부|지원실|영업|생산|공정|공장|개발|전략|재무|회계|법무|인사|총무|마케팅|연구|품질|QA|QC|Lab|랩|Unit|유닛|Cell|셀|총괄|대표)/i;
 
 function isNameCandidate(v){
@@ -151,14 +164,20 @@ function isNameCandidate(v){
   if(!s) return false;
   if(/\d/.test(s)) return false;
 
-  if (NAME_KO_STRICT.test(s)) return true;             // 예: 노정실, 김가은
-  if (NAME_EN.test(s)) return true;                    // 예: Sally Wu
-  if (NAME_KO_RELAXED.test(s) && !DEPT_WORD.test(s)) return true; // 5~6자 한글
+  if (NAME_KO_CORE.test(s)) return true;
+  if (NAME_KO_WITH_SUFFIX.test(s)) return true;
+  if (NAME_KO_WITH_PAREN_SFX.test(s)) return true;
+  if (NAME_KO_WITH_SPACE_SFX.test(s)) return true;
+  if (NAME_EN.test(s)) return true;
+
+  // 5~6자 한글인데 부서 키워드가 없으면 이름으로 인정
+  if (/^[가-힣]{5,6}$/.test(s) && !DEPT_WORD.test(s)) return true;
 
   return false;
 }
+
 function pickNameWithIndex(cells){
-  const order = [2,1,3,0,4,5];
+  const order = [2,1,3,0,4,5,6];
   for(const idx of order){
     if(isNameCandidate(cells[idx])) return {name: String(cells[idx]).trim(), idx};
   }
@@ -169,16 +188,19 @@ function pickNameWithIndex(cells){
 }
 
 function pickDeptSmart(cells, nameIdx){
+  // 1) 이름 오른쪽에서 첫 비어있지 않은 텍스트
   if(nameIdx >= 0){
     for(let i=nameIdx+1;i<cells.length;i++){
       const v = String(cells[i] ?? "").trim();
       if(v && !isDigits(v)) return v;
     }
   }
+  // 2) 키워드 매칭
   for(let i=0;i<cells.length;i++){
     const v = String(cells[i] ?? "").trim();
     if(v && DEPT_WORD.test(v)) return v;
   }
+  // 3) 가장 긴 텍스트
   let best = "";
   for(const v0 of cells){
     const v = String(v0 ?? "").trim();
@@ -191,7 +213,7 @@ function pickOrgSmart(cells, nameIdx){
   if(nameIdx > 0){
     for(let i=nameIdx-1;i>=0;i--){
       const v = String(cells[i] ?? "").trim();
-      if(v && !isDigits(v)) return v;
+      if(v && !isDigits(v)) return v; // 보통 회사명(휴젤/아크로스)
     }
   }
   const candidates = cells
@@ -238,9 +260,11 @@ function parseGroupWorkbook(wb){
   return out;
 }
 
-/* ===== 통합 ===== */
+/* =========================
+   통합(버스+조)
+   ========================= */
 function combine(busArr, groupArr){
-  const busMap = new Map();
+  const busMap = new Map(); // name -> array
   for(const b of busArr){
     const key = b["이름"];
     if(!busMap.has(key)) busMap.set(key, []);
@@ -263,6 +287,7 @@ function combine(busArr, groupArr){
     return list[idx];
   }
 
+  // 조가 있는(또는 특수구간 공란 포함) 사람들
   for(const g of groupArr){
     const b = pickBusForGroup(g["이름"], g["부서"], g["소속"]);
     results.push({
@@ -275,6 +300,7 @@ function combine(busArr, groupArr){
     });
   }
 
+  // 버스만 있는 사람
   const namesInGroup = new Set(groupArr.map(g=>g["이름"]));
   for(const [name, list] of busMap){
     if(namesInGroup.has(name)) continue;
@@ -291,7 +317,9 @@ function combine(busArr, groupArr){
   return results;
 }
 
-/* ===== UI ===== */
+/* =========================
+   UI
+   ========================= */
 function render(list){
   rowsEl.innerHTML = "";
   for(const r of list){
@@ -314,6 +342,7 @@ function run(){
 }
 qEl.addEventListener("keydown", e => { if(e.key==="Enter") run(); });
 
+// 로드
 Promise.all([
   fetch(BUS_XLSX_URL,   {cache:"no-store"}).then(r=>{ if(!r.ok) throw new Error("버스 엑셀 로드 실패"); return r.arrayBuffer(); }).then(buf=>XLSX.read(buf,{type:'array'})).then(parseBusWorkbook),
   fetch(GROUP_XLSX_URL, {cache:"no-store"}).then(r=>{ if(!r.ok) throw new Error("조 엑셀 로드 실패");   return r.arrayBuffer(); }).then(buf=>XLSX.read(buf,{type:'array'})).then(parseGroupWorkbook)
@@ -321,6 +350,13 @@ Promise.all([
   DATA = combine(busArr, groupArr);
   errEl.textContent = "";
   render([]);
+  // 선택: 누락자 콘솔 체크
+  try{
+    const allNames = new Set([...busArr.map(r=>r["이름"]), ...groupArr.map(r=>r["이름"])]);
+    const resultNames = new Set(DATA.map(r=>r["이름"]));
+    const missing = [...allNames].filter(n => !resultNames.has(n));
+    if(missing.length){ console.warn("누락자:", missing); }
+  }catch(_){}
 }).catch(err=>{
   errEl.textContent = "데이터 로드 실패: " + String(err) + "\n(경로/파일명, CDN 차단 여부를 확인해주세요)";
 });
